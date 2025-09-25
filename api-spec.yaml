@@ -1,0 +1,1412 @@
+openapi: 3.0.3
+info:
+  title: AfroChat API
+  description: |
+    A comprehensive real-time communication platform API for Slack-like functionality.
+    This API provides endpoints for authentication, messaging, workspace management, 
+    file sharing, and real-time communication via WebSockets.
+  version: 1.0.0
+  contact:
+    name: AfroChat Development Team
+    email: dev@afrochat.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.afrochat.com/v1
+    description: Production server
+  - url: https://staging-api.afrochat.com/v1
+    description: Staging server
+  - url: http://localhost:8080/api/v1
+    description: Development server
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+paths:
+  # Authentication Endpoints
+  /auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Register a new user
+      description: Create a new user account with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: "user@example.com"
+              username: "johndoe"
+              password: "securepassword123"
+              displayName: "John Doe"
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Bad request - validation errors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflict - user already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Login user
+      description: Authenticate user with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: "user@example.com"
+              password: "securepassword123"
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Unauthorized - invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Refresh access token
+      description: Get a new access token using refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Unauthorized - invalid refresh token
+
+  /auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: Logout user
+      description: Invalidate user session and tokens
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # User Endpoints
+  /users/profile:
+    get:
+      tags:
+        - Users
+      summary: Get user profile
+      description: Retrieve current user's profile information
+      responses:
+        '200':
+          description: User profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+
+    put:
+      tags:
+        - Users
+      summary: Update user profile
+      description: Update current user's profile information
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Bad request - validation errors
+
+  /users/search:
+    get:
+      tags:
+        - Users
+      summary: Search users
+      description: Search for users by username or display name
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Search query
+          schema:
+            type: string
+            minLength: 2
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+                  total:
+                    type: integer
+
+  # Workspace Endpoints
+  /workspaces:
+    get:
+      tags:
+        - Workspaces
+      summary: Get user workspaces
+      description: Retrieve all workspaces the user is a member of
+      responses:
+        '200':
+          description: Workspaces retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Workspace'
+
+    post:
+      tags:
+        - Workspaces
+      summary: Create workspace
+      description: Create a new workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkspaceRequest'
+      responses:
+        '201':
+          description: Workspace created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workspace'
+        '400':
+          description: Bad request - validation errors
+
+  /workspaces/{workspaceId}:
+    get:
+      tags:
+        - Workspaces
+      summary: Get workspace details
+      description: Retrieve detailed information about a specific workspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Workspace details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workspace'
+        '404':
+          description: Workspace not found
+
+    put:
+      tags:
+        - Workspaces
+      summary: Update workspace
+      description: Update workspace information (admin only)
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorkspaceRequest'
+      responses:
+        '200':
+          description: Workspace updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workspace'
+        '403':
+          description: Forbidden - insufficient permissions
+
+  /workspaces/{workspaceId}/members:
+    get:
+      tags:
+        - Workspaces
+      summary: Get workspace members
+      description: Retrieve all members of a workspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Members retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WorkspaceMember'
+
+    post:
+      tags:
+        - Workspaces
+      summary: Invite user to workspace
+      description: Send invitation to join workspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteUserRequest'
+      responses:
+        '201':
+          description: Invitation sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invitation'
+
+  # Channel Endpoints
+  /workspaces/{workspaceId}/channels:
+    get:
+      tags:
+        - Channels
+      summary: Get workspace channels
+      description: Retrieve all channels in a workspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID
+          schema:
+            type: string
+            format: uuid
+        - name: type
+          in: query
+          description: Filter channels by type
+          schema:
+            type: string
+            enum: [public, private, direct]
+      responses:
+        '200':
+          description: Channels retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Channel'
+
+    post:
+      tags:
+        - Channels
+      summary: Create channel
+      description: Create a new channel in workspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChannelRequest'
+      responses:
+        '201':
+          description: Channel created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+
+  /channels/{channelId}:
+    get:
+      tags:
+        - Channels
+      summary: Get channel details
+      description: Retrieve detailed information about a channel
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Channel details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+        '404':
+          description: Channel not found
+
+    put:
+      tags:
+        - Channels
+      summary: Update channel
+      description: Update channel information
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChannelRequest'
+      responses:
+        '200':
+          description: Channel updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Channel'
+
+    delete:
+      tags:
+        - Channels
+      summary: Delete channel
+      description: Delete a channel (admin only)
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Channel deleted successfully
+        '403':
+          description: Forbidden - insufficient permissions
+
+  /channels/{channelId}/members:
+    get:
+      tags:
+        - Channels
+      summary: Get channel members
+      description: Retrieve all members of a channel
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Members retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChannelMember'
+
+    post:
+      tags:
+        - Channels
+      summary: Add member to channel
+      description: Add a user to a channel
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '201':
+          description: Member added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelMember'
+
+  # Message Endpoints
+  /channels/{channelId}/messages:
+    get:
+      tags:
+        - Messages
+      summary: Get channel messages
+      description: Retrieve messages from a channel with pagination
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          description: Number of messages to retrieve
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: before
+          in: query
+          description: Get messages before this timestamp
+          schema:
+            type: string
+            format: date-time
+        - name: after
+          in: query
+          description: Get messages after this timestamp
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Messages retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  hasMore:
+                    type: boolean
+                  nextCursor:
+                    type: string
+
+    post:
+      tags:
+        - Messages
+      summary: Send message
+      description: Send a new message to a channel
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Message sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+
+  /messages/{messageId}:
+    get:
+      tags:
+        - Messages
+      summary: Get message
+      description: Retrieve a specific message
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Message retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '404':
+          description: Message not found
+
+    put:
+      tags:
+        - Messages
+      summary: Edit message
+      description: Edit an existing message
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditMessageRequest'
+      responses:
+        '200':
+          description: Message edited successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '403':
+          description: Forbidden - can only edit own messages
+
+    delete:
+      tags:
+        - Messages
+      summary: Delete message
+      description: Delete a message
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Message deleted successfully
+        '403':
+          description: Forbidden - can only delete own messages
+
+  /messages/{messageId}/reactions:
+    post:
+      tags:
+        - Messages
+      summary: Add reaction
+      description: Add a reaction to a message
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddReactionRequest'
+      responses:
+        '201':
+          description: Reaction added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reaction'
+
+    delete:
+      tags:
+        - Messages
+      summary: Remove reaction
+      description: Remove a reaction from a message
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID
+          schema:
+            type: string
+            format: uuid
+        - name: emoji
+          in: query
+          required: true
+          description: Emoji to remove
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Reaction removed successfully
+
+  # File Endpoints
+  /files/upload:
+    post:
+      tags:
+        - Files
+      summary: Upload file
+      description: Upload a file to the server
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                channelId:
+                  type: string
+                  format: uuid
+                description:
+                  type: string
+      responses:
+        '201':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+
+  /files/{fileId}:
+    get:
+      tags:
+        - Files
+      summary: Get file
+      description: Retrieve file information and download URL
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          description: File ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: File information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+
+    delete:
+      tags:
+        - Files
+      summary: Delete file
+      description: Delete a file
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          description: File ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: File deleted successfully
+        '403':
+          description: Forbidden - insufficient permissions
+
+  # Search Endpoints
+  /search:
+    get:
+      tags:
+        - Search
+      summary: Search messages and files
+      description: Search across messages, files, and users
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Search query
+          schema:
+            type: string
+            minLength: 2
+        - name: type
+          in: query
+          description: Search type filter
+          schema:
+            type: string
+            enum: [messages, files, users, all]
+            default: all
+        - name: workspaceId
+          in: query
+          description: Limit search to specific workspace
+          schema:
+            type: string
+            format: uuid
+        - name: channelId
+          in: query
+          description: Limit search to specific channel
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResults'
+
+  # WebSocket Endpoint
+  /ws:
+    get:
+      tags:
+        - WebSocket
+      summary: WebSocket connection
+      description: |
+        Establish WebSocket connection for real-time communication.
+        
+        **Connection URL:** `ws://localhost:8080/api/v1/ws?token=<access_token>`
+        
+        **Message Format:**
+        ```json
+        {
+          "type": "message_sent",
+          "data": {
+            "message": {...}
+          }
+        }
+        ```
+        
+        **Event Types:**
+        - `message_sent` - New message received
+        - `message_edited` - Message was edited
+        - `message_deleted` - Message was deleted
+        - `user_typing` - User is typing
+        - `user_joined` - User joined channel
+        - `user_left` - User left channel
+        - `channel_created` - New channel created
+        - `channel_updated` - Channel was updated
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: Access token for authentication
+          schema:
+            type: string
+      responses:
+        '101':
+          description: WebSocket connection established
+        '401':
+          description: Unauthorized - invalid token
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    # Authentication Schemas
+    RegisterRequest:
+      type: object
+      required:
+        - email
+        - username
+        - password
+        - displayName
+      properties:
+        email:
+          type: string
+          format: email
+          example: "user@example.com"
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          pattern: "^[a-zA-Z0-9_-]+$"
+          example: "johndoe"
+        password:
+          type: string
+          minLength: 8
+          example: "securepassword123"
+        displayName:
+          type: string
+          maxLength: 100
+          example: "John Doe"
+
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: "user@example.com"
+        password:
+          type: string
+          example: "securepassword123"
+
+    RefreshRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+    AuthResponse:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        accessToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        refreshToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        expiresIn:
+          type: integer
+          example: 3600
+
+    # User Schemas
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        email:
+          type: string
+          format: email
+          example: "user@example.com"
+        username:
+          type: string
+          example: "johndoe"
+        displayName:
+          type: string
+          example: "John Doe"
+        avatarUrl:
+          type: string
+          format: uri
+          example: "https://example.com/avatar.jpg"
+        status:
+          type: string
+          enum: [online, offline, away, busy]
+          example: "online"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        displayName:
+          type: string
+          maxLength: 100
+          example: "John Doe"
+        avatarUrl:
+          type: string
+          format: uri
+          example: "https://example.com/avatar.jpg"
+        status:
+          type: string
+          enum: [online, offline, away, busy]
+          example: "online"
+
+    # Workspace Schemas
+    Workspace:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        name:
+          type: string
+          example: "Acme Corp"
+        slug:
+          type: string
+          example: "acme-corp"
+        description:
+          type: string
+          example: "Our company workspace"
+        ownerId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    CreateWorkspaceRequest:
+      type: object
+      required:
+        - name
+        - slug
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          example: "Acme Corp"
+        slug:
+          type: string
+          pattern: "^[a-z0-9-]+$"
+          example: "acme-corp"
+        description:
+          type: string
+          maxLength: 500
+          example: "Our company workspace"
+
+    UpdateWorkspaceRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          example: "Acme Corp"
+        description:
+          type: string
+          maxLength: 500
+          example: "Our company workspace"
+
+    WorkspaceMember:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        role:
+          type: string
+          enum: [admin, member, guest]
+          example: "member"
+        joinedAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    InviteUserRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          example: "newuser@example.com"
+        role:
+          type: string
+          enum: [admin, member, guest]
+          default: "member"
+          example: "member"
+
+    Invitation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        email:
+          type: string
+          format: email
+          example: "newuser@example.com"
+        role:
+          type: string
+          enum: [admin, member, guest]
+          example: "member"
+        workspaceId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        expiresAt:
+          type: string
+          format: date-time
+          example: "2023-01-08T00:00:00Z"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    # Channel Schemas
+    Channel:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        name:
+          type: string
+          example: "general"
+        description:
+          type: string
+          example: "General discussion"
+        workspaceId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        isPrivate:
+          type: boolean
+          example: false
+        createdBy:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        memberCount:
+          type: integer
+          example: 25
+        createdAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    CreateChannelRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z0-9-]+$"
+          example: "general"
+        description:
+          type: string
+          maxLength: 500
+          example: "General discussion"
+        isPrivate:
+          type: boolean
+          default: false
+          example: false
+
+    UpdateChannelRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z0-9-]+$"
+          example: "general"
+        description:
+          type: string
+          maxLength: 500
+          example: "General discussion"
+
+    ChannelMember:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        joinedAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    AddMemberRequest:
+      type: object
+      required:
+        - userId
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+
+    # Message Schemas
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        content:
+          type: string
+          example: "Hello everyone!"
+        channelId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        userId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        user:
+          $ref: '#/components/schemas/User'
+        threadId:
+          type: string
+          format: uuid
+          nullable: true
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        editedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2023-01-01T00:00:00Z"
+        reactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reaction'
+        createdAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    SendMessageRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          maxLength: 4000
+          example: "Hello everyone!"
+        threadId:
+          type: string
+          format: uuid
+          nullable: true
+          example: "123e4567-e89b-12d3-a456-426614174000"
+
+    EditMessageRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          maxLength: 4000
+          example: "Hello everyone! (edited)"
+
+    Reaction:
+      type: object
+      properties:
+        emoji:
+          type: string
+          example: "👍"
+        count:
+          type: integer
+          example: 5
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+
+    AddReactionRequest:
+      type: object
+      required:
+        - emoji
+      properties:
+        emoji:
+          type: string
+          example: "👍"
+
+    # File Schemas
+    File:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        filename:
+          type: string
+          example: "document.pdf"
+        originalName:
+          type: string
+          example: "My Document.pdf"
+        mimeType:
+          type: string
+          example: "application/pdf"
+        size:
+          type: integer
+          example: 1024000
+        url:
+          type: string
+          format: uri
+          example: "https://example.com/files/document.pdf"
+        thumbnailUrl:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://example.com/thumbnails/document.jpg"
+        channelId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        uploadedBy:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+
+    # Search Schemas
+    SearchResults:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/File'
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        total:
+          type: integer
+          example: 25
+
+    # Common Schemas
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Validation failed"
+        message:
+          type: string
+          example: "The request contains invalid data"
+        details:
+          type: object
+          additionalProperties: true
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Operation completed successfully"
+
+tags:
+  - name: Authentication
+    description: User authentication and authorization
+  - name: Users
+    description: User management and profiles
+  - name: Workspaces
+    description: Workspace management and invitations
+  - name: Channels
+    description: Channel management and membership
+  - name: Messages
+    description: Message sending, editing, and reactions
+  - name: Files
+    description: File upload and management
+  - name: Search
+    description: Search functionality
+  - name: WebSocket
+    description: Real-time communication
