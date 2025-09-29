@@ -52,6 +52,12 @@ ios/
 │   │   │   ├── TypingIndicatorView.swift
 │   │   │   ├── MessageReactionView.swift
 │   │   │   └── ThreadView.swift
+│   │   ├── Video/
+│   │   │   ├── VideoCallView.swift
+│   │   │   ├── ParticipantGridView.swift
+│   │   │   ├── VideoCallControls.swift
+│   │   │   ├── ParticipantVideoView.swift
+│   │   │   └── ScreenShareView.swift
 │   │   ├── Profile/
 │   │   │   ├── ProfileView.swift
 │   │   │   ├── EditProfileView.swift
@@ -69,7 +75,9 @@ ios/
 │   │   ├── WorkspaceService.swift
 │   │   ├── FileService.swift
 │   │   ├── NotificationService.swift
-│   │   └── CoreDataService.swift
+│   │   ├── CoreDataService.swift
+│   │   ├── VideoCallService.swift
+│   │   └── WebRTCService.swift
 │   ├── Utils/
 │   │   ├── NetworkManager.swift
 │   │   ├── KeychainManager.swift
@@ -673,6 +681,534 @@ enum KeychainKey: String {
 }
 ```
 
+## 📹 Video Calling Implementation
+
+### WebRTC Service
+```swift
+// Services/WebRTCService.swift
+import Foundation
+import WebRTC
+import AVFoundation
+
+class WebRTCService: NSObject, ObservableObject {
+    private var peerConnectionFactory: RTCPeerConnectionFactory?
+    private var peerConnections: [String: RTCPeerConnection] = [:]
+    private var localVideoSource: RTCVideoSource?
+    private var localVideoTrack: RTCVideoTrack?
+    private var localAudioTrack: RTCAudioTrack?
+    private var videoCapturer: RTCVideoCapturer?
+    
+    @Published var isConnected = false
+    @Published var remoteStreams: [String: RTCMediaStream] = [:]
+    
+    override init() {
+        super.init()
+        setupPeerConnectionFactory()
+    }
+    
+    private func setupPeerConnectionFactory() {
+        RTCInitializeSSL()
+        
+        let videoEncoderFactory = RTCDefaultVideoEncoderFactory()
+        let videoDecoderFactory = RTCDefaultVideoDecoderFactory()
+        
+        peerConnectionFactory = RTCPeerConnectionFactory(
+            encoderFactory: videoEncoderFactory,
+            decoderFactory: videoDecoderFactory
+        )
+    }
+    
+    func startLocalVideo() async throws -> RTCVideoTrack? {
+        guard let peerConnectionFactory = peerConnectionFactory else {
+            throw WebRTCError.factoryNotInitialized
+        }
+        
+        // Request camera permission
+        let status = await AVCaptureDevice.requestAccess(for: .video)
+        guard status else {
+            throw WebRTCError.cameraPermissionDenied
+        }
+        
+        // Create video source and capturer
+        localVideoSource = peerConnectionFactory.videoSource()
+        videoCapturer = RTCCameraVideoCapturer(delegate: localVideoSource!)
+        
+        // Create video track
+        localVideoTrack = peerConnectionFactory.videoTrack(
+            with: localVideoSource!,
+            trackId: "video_track"
+        )
+        
+        // Start camera capture
+        if let capturer = videoCapturer as? RTCCameraVideoCapturer {
+            let frontCamera = RTCCameraVideoCapturer.captureDevices().first { device in
+                device.position == .front
+            }
+            
+            if let camera = frontCamera {
+                try await capturer.startCapture(with: camera, format: nil, fps: 30)
+            }
+        }
+        
+        return localVideoTrack
+    }
+    
+    func startLocalAudio() -> RTCAudioTrack? {
+        guard let peerConnectionFactory = peerConnectionFactory else {
+            return nil
+        }
+        
+        let audioSource = peerConnectionFactory.audioSource(with: nil)
+        localAudioTrack = peerConnectionFactory.audioTrack(with: audioSource, trackId: "audio_track")
+        
+        return localAudioTrack
+    }
+    
+    func createPeerConnection(for userId: String) -> RTCPeerConnection? {
+        guard let peerConnectionFactory = peerConnectionFactory else {
+            return nil
+        }
+        
+        let configuration = RTCConfiguration()
+        configuration.iceServers = [
+            RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urlStrings: ["stun:stun1.l.google.com:19302"])
+        ]
+        
+        let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
+        let peerConnection = peerConnectionFactory.peerConnection(
+            with: configuration,
+            constraints: constraints,
+            delegate: self
+        )
+        
+        // Add local tracks
+        if let videoTrack = localVideoTrack {
+            peerConnection.add(videoTrack, streamIds: ["local_stream"])
+        }
+        if let audioTrack = localAudioTrack {
+            peerConnection.add(audioTrack, streamIds: ["local_stream"])
+        }
+        
+        peerConnections[userId] = peerConnection
+        return peerConnection
+    }
+    
+    func createOffer(for userId: String) async throws -> RTCSessionDescription {
+        guard let peerConnection = createPeerConnection(for: userId) else {
+            throw WebRTCError.peerConnectionFailed
+        }
+        
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "true",
+                "OfferToReceiveVideo": "true"
+            ],
+            optionalConstraints: nil
+        )
+        
+        let offer = try await peerConnection.offer(for: constraints)
+        try await peerConnection.setLocalDescription(offer)
+        
+        return offer
+    }
+    
+    func handleOffer(_ offer: RTCSessionDescription, from userId: String) async throws -> RTCSessionDescription {
+        guard let peerConnection = createPeerConnection(for: userId) else {
+            throw WebRTCError.peerConnectionFailed
+        }
+        
+        try await peerConnection.setRemoteDescription(offer)
+        
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "true",
+                "OfferToReceiveVideo": "true"
+            ],
+            optionalConstraints: nil
+        )
+        
+        let answer = try await peerConnection.answer(for: constraints)
+        try await peerConnection.setLocalDescription(answer)
+        
+        return answer
+    }
+    
+    func handleAnswer(_ answer: RTCSessionDescription, from userId: String) async throws {
+        guard let peerConnection = peerConnections[userId] else {
+            throw WebRTCError.peerConnectionNotFound
+        }
+        
+        try await peerConnection.setRemoteDescription(answer)
+    }
+    
+    func addIceCandidate(_ candidate: RTCIceCandidate, from userId: String) async throws {
+        guard let peerConnection = peerConnections[userId] else {
+            throw WebRTCError.peerConnectionNotFound
+        }
+        
+        try await peerConnection.add(candidate)
+    }
+    
+    func toggleMute() {
+        localAudioTrack?.isEnabled.toggle()
+    }
+    
+    func toggleVideo() {
+        localVideoTrack?.isEnabled.toggle()
+    }
+    
+    func startScreenShare() async throws -> RTCVideoTrack? {
+        // iOS screen sharing implementation
+        // This would require additional setup for screen recording
+        throw WebRTCError.notImplemented
+    }
+}
+
+extension WebRTCService: RTCPeerConnectionDelegate {
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
+        DispatchQueue.main.async {
+            self.isConnected = stateChanged == .stable
+        }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
+        DispatchQueue.main.async {
+            // Find the user ID for this peer connection
+            if let userId = self.peerConnections.first(where: { $0.value == peerConnection })?.key {
+                self.remoteStreams[userId] = stream
+            }
+        }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {
+        DispatchQueue.main.async {
+            if let userId = self.peerConnections.first(where: { $0.value == peerConnection })?.key {
+                self.remoteStreams.removeValue(forKey: userId)
+            }
+        }
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        // Handle ICE connection state changes
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        // Handle ICE gathering state changes
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        // Send ICE candidate via WebSocket
+        sendICECandidate(candidate, to: peerConnection)
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {
+        // Handle removed ICE candidates
+    }
+    
+    func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
+        // Handle data channel
+    }
+    
+    private func sendICECandidate(_ candidate: RTCIceCandidate, to peerConnection: RTCPeerConnection) {
+        // Find user ID and send via WebSocket
+        if let userId = peerConnections.first(where: { $0.value == peerConnection })?.key {
+            // Send via WebSocket service
+        }
+    }
+}
+
+enum WebRTCError: Error, LocalizedError {
+    case factoryNotInitialized
+    case cameraPermissionDenied
+    case peerConnectionFailed
+    case peerConnectionNotFound
+    case notImplemented
+    
+    var errorDescription: String? {
+        switch self {
+        case .factoryNotInitialized:
+            return "WebRTC factory not initialized"
+        case .cameraPermissionDenied:
+            return "Camera permission denied"
+        case .peerConnectionFailed:
+            return "Failed to create peer connection"
+        case .peerConnectionNotFound:
+            return "Peer connection not found"
+        case .notImplemented:
+            return "Feature not implemented"
+        }
+    }
+}
+```
+
+### Video Call ViewModel
+```swift
+// ViewModels/VideoCallViewModel.swift
+import Foundation
+import Combine
+import WebRTC
+
+@MainActor
+class VideoCallViewModel: ObservableObject {
+    @Published var isInCall = false
+    @Published var participants: [CallParticipant] = []
+    @Published var isMuted = false
+    @Published var isVideoEnabled = true
+    @Published var isScreenSharing = false
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    
+    private let videoCallService: VideoCallService
+    private let webrtcService: WebRTCService
+    private var cancellables = Set<AnyCancellable>()
+    
+    init(videoCallService: VideoCallService = VideoCallService(),
+         webrtcService: WebRTCService = WebRTCService()) {
+        self.videoCallService = videoCallService
+        self.webrtcService = webrtcService
+        
+        setupWebRTCObservers()
+    }
+    
+    func startCall(channelId: UUID, title: String) async {
+        isLoading = true
+        
+        do {
+            let call = try await videoCallService.startCall(
+                channelId: channelId,
+                title: title
+            )
+            
+            // Initialize WebRTC
+            _ = try await webrtcService.startLocalVideo()
+            _ = webrtcService.startLocalAudio()
+            
+            isInCall = true
+            isLoading = false
+            
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+    
+    func joinCall(callId: UUID) async {
+        isLoading = true
+        
+        do {
+            let call = try await videoCallService.joinCall(callId: callId)
+            
+            // Initialize WebRTC
+            _ = try await webrtcService.startLocalVideo()
+            _ = webrtcService.startLocalAudio()
+            
+            isInCall = true
+            isLoading = false
+            
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+    
+    func leaveCall() async {
+        do {
+            try await videoCallService.leaveCall()
+            isInCall = false
+            participants = []
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+    
+    func toggleMute() {
+        webrtcService.toggleMute()
+        isMuted.toggle()
+    }
+    
+    func toggleVideo() {
+        webrtcService.toggleVideo()
+        isVideoEnabled.toggle()
+    }
+    
+    func toggleScreenShare() async {
+        do {
+            if isScreenSharing {
+                // Stop screen sharing
+                isScreenSharing = false
+            } else {
+                _ = try await webrtcService.startScreenShare()
+                isScreenSharing = true
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+    
+    private func setupWebRTCObservers() {
+        webrtcService.$remoteStreams
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] streams in
+                // Update participants with remote streams
+                self?.updateParticipants(with: streams)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func updateParticipants(with streams: [String: RTCMediaStream]) {
+        // Update participants with remote video streams
+        // Implementation depends on your participant data structure
+    }
+}
+```
+
+### Video Call View
+```swift
+// Views/Video/VideoCallView.swift
+import SwiftUI
+import WebRTC
+
+struct VideoCallView: View {
+    let callId: UUID?
+    let channelId: UUID
+    @StateObject private var viewModel = VideoCallViewModel()
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            if viewModel.isInCall {
+                VStack {
+                    // Participant grid
+                    ParticipantGridView(
+                        participants: viewModel.participants,
+                        remoteStreams: viewModel.webrtcService.remoteStreams
+                    )
+                    
+                    Spacer()
+                    
+                    // Call controls
+                    VideoCallControls(
+                        isMuted: viewModel.isMuted,
+                        isVideoEnabled: viewModel.isVideoEnabled,
+                        isScreenSharing: viewModel.isScreenSharing,
+                        onToggleMute: { viewModel.toggleMute() },
+                        onToggleVideo: { viewModel.toggleVideo() },
+                        onToggleScreenShare: { 
+                            Task { await viewModel.toggleScreenShare() }
+                        },
+                        onLeaveCall: { 
+                            Task { await viewModel.leaveCall() }
+                        }
+                    )
+                }
+            } else {
+                // Call setup or loading
+                if viewModel.isLoading {
+                    ProgressView("Connecting...")
+                        .foregroundColor(.white)
+                } else {
+                    CallSetupView(
+                        channelId: channelId,
+                        onStartCall: { title in
+                            Task {
+                                await viewModel.startCall(channelId: channelId, title: title)
+                            }
+                        }
+                    )
+                }
+            }
+        }
+        .task {
+            if let callId = callId {
+                await viewModel.joinCall(callId: callId)
+            }
+        }
+        .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
+            Button("OK") {
+                viewModel.errorMessage = nil
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
+    }
+}
+
+struct ParticipantGridView: View {
+    let participants: [CallParticipant]
+    let remoteStreams: [String: RTCMediaStream]
+    
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 8) {
+            ForEach(participants) { participant in
+                ParticipantVideoView(
+                    participant: participant,
+                    stream: remoteStreams[participant.userId.uuidString]
+                )
+                .aspectRatio(16/9, contentMode: .fit)
+            }
+        }
+        .padding()
+    }
+}
+
+struct VideoCallControls: View {
+    let isMuted: Bool
+    let isVideoEnabled: Bool
+    let isScreenSharing: Bool
+    let onToggleMute: () -> Void
+    let onToggleVideo: () -> Void
+    let onToggleScreenShare: () -> Void
+    let onLeaveCall: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 20) {
+            // Mute button
+            Button(action: onToggleMute) {
+                Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
+                    .font(.title2)
+                    .foregroundColor(isMuted ? .red : .white)
+                    .frame(width: 50, height: 50)
+                    .background(Color.gray.opacity(0.3))
+                    .clipShape(Circle())
+            }
+            
+            // Video button
+            Button(action: onToggleVideo) {
+                Image(systemName: isVideoEnabled ? "video.fill" : "video.slash.fill")
+                    .font(.title2)
+                    .foregroundColor(isVideoEnabled ? .white : .red)
+                    .frame(width: 50, height: 50)
+                    .background(Color.gray.opacity(0.3))
+                    .clipShape(Circle())
+            }
+            
+            // Screen share button
+            Button(action: onToggleScreenShare) {
+                Image(systemName: isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle")
+                    .font(.title2)
+                    .foregroundColor(isScreenSharing ? .blue : .white)
+                    .frame(width: 50, height: 50)
+                    .background(Color.gray.opacity(0.3))
+                    .clipShape(Circle())
+            }
+            
+            // Leave call button
+            Button(action: onLeaveCall) {
+                Image(systemName: "phone.down.fill")
+                    .font(.title2)
+                    .foregroundColor(.white)
+                    .frame(width: 50, height: 50)
+                    .background(Color.red)
+                    .clipShape(Circle())
+            }
+        }
+        .padding()
+    }
+}
+```
+
 ## 🔔 Push Notifications
 
 ### Notification Service
@@ -734,6 +1270,24 @@ class NotificationService: NSObject, ObservableObject {
         if let messageData = userInfo["message"] as? [String: Any] {
             // Process message notification
         }
+        
+        if let callData = userInfo["call"] as? [String: Any] {
+            // Process video call notification
+            handleVideoCallNotification(callData)
+        }
+    }
+    
+    private func handleVideoCallNotification(_ callData: [String: Any]) {
+        // Handle video call notification
+        if let callId = callData["call_id"] as? String,
+           let title = callData["title"] as? String {
+            // Navigate to video call
+            NotificationCenter.default.post(
+                name: .navigateToVideoCall,
+                object: nil,
+                userInfo: ["call_id": callId, "title": title]
+            )
+        }
     }
 }
 
@@ -764,12 +1318,22 @@ extension NotificationService: UNUserNotificationCenterDelegate {
             )
         }
         
+        if let callId = userInfo["call_id"] as? String {
+            // Navigate to video call
+            NotificationCenter.default.post(
+                name: .navigateToVideoCall,
+                object: nil,
+                userInfo: ["call_id": callId]
+            )
+        }
+        
         completionHandler()
     }
 }
 
 extension Notification.Name {
     static let navigateToChannel = Notification.Name("navigateToChannel")
+    static let navigateToVideoCall = Notification.Name("navigateToVideoCall")
 }
 ```
 

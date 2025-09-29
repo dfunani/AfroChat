@@ -233,6 +233,14 @@ DELETE /api/v1/messages/{id}
 POST   /api/v1/files/upload
 GET    /api/v1/files/{id}
 DELETE /api/v1/files/{id}
+
+// Video Calls
+POST   /api/v1/calls/start
+POST   /api/v1/calls/{id}/join
+POST   /api/v1/calls/{id}/leave
+POST   /api/v1/calls/{id}/end
+GET    /api/v1/calls/{id}
+GET    /api/v1/calls/{id}/participants
 ```
 
 ### WebSocket Events
@@ -261,6 +269,13 @@ const (
     EventUserLeft = "user_left"
     EventChannelCreated = "channel_created"
     EventChannelUpdated = "channel_updated"
+    EventCallStarted = "call_started"
+    EventCallEnded = "call_ended"
+    EventUserJoinedCall = "user_joined_call"
+    EventUserLeftCall = "user_left_call"
+    EventWebRTCOffer = "webrtc_offer"
+    EventWebRTCAnswer = "webrtc_answer"
+    EventWebRTCIceCandidate = "webrtc_ice_candidate"
 )
 ```
 
@@ -290,6 +305,11 @@ WebSocket Broadcast → All Connected Clients (Web, iOS, Android)
 #### Real-time Messaging
 - **Backend**: WebSocket connections, message persistence, threading
 - **Frontend**: Real-time message display, rich text formatting, reactions
+
+#### Video Calling & Conferencing
+- **Backend**: WebRTC signaling server, call management, participant tracking
+- **Frontend**: HD video calls, screen sharing, call controls, participant management
+- **Features**: Multi-participant calls, mute/unmute, video on/off, call recording
 
 #### Workspace & Channel Management
 - **Backend**: Workspace configuration, channel permissions, member management
@@ -326,7 +346,8 @@ WebSocket Broadcast → All Connected Clients (Web, iOS, Android)
 │   ├── workspace/           # Workspace service
 │   ├── notification/        # Notification service
 │   ├── file/                # File service
-│   └── search/              # Search service
+│   ├── search/              # Search service
+│   └── video/               # Video calling service
 ├── pkg/
 │   ├── database/            # Database connections
 │   ├── redis/               # Redis client

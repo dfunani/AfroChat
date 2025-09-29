@@ -850,6 +850,153 @@ paths:
               schema:
                 $ref: '#/components/schemas/SearchResults'
 
+  # Video Calling Endpoints
+  /calls/start:
+    post:
+      tags:
+        - Video Calls
+      summary: Start video call
+      description: Initiate a video call in a channel or direct message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartCallRequest'
+      responses:
+        '201':
+          description: Video call started successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoCall'
+        '400':
+          description: Bad request - invalid call parameters
+        '403':
+          description: Forbidden - insufficient permissions
+
+  /calls/{callId}/join:
+    post:
+      tags:
+        - Video Calls
+      summary: Join video call
+      description: Join an existing video call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          description: Video call ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinCallRequest'
+      responses:
+        '200':
+          description: Successfully joined video call
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallParticipant'
+        '404':
+          description: Video call not found
+        '403':
+          description: Forbidden - call is private or full
+
+  /calls/{callId}/leave:
+    post:
+      tags:
+        - Video Calls
+      summary: Leave video call
+      description: Leave an active video call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          description: Video call ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Successfully left video call
+        '404':
+          description: Video call not found
+
+  /calls/{callId}/end:
+    post:
+      tags:
+        - Video Calls
+      summary: End video call
+      description: End a video call (host only)
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          description: Video call ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Video call ended successfully
+        '403':
+          description: Forbidden - only call host can end call
+        '404':
+          description: Video call not found
+
+  /calls/{callId}:
+    get:
+      tags:
+        - Video Calls
+      summary: Get video call details
+      description: Retrieve information about a specific video call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          description: Video call ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Video call details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoCall'
+        '404':
+          description: Video call not found
+
+  /calls/{callId}/participants:
+    get:
+      tags:
+        - Video Calls
+      summary: Get call participants
+      description: Retrieve list of participants in a video call
+      parameters:
+        - name: callId
+          in: path
+          required: true
+          description: Video call ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Participants retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CallParticipant'
+
   # WebSocket Endpoint
   /ws:
     get:
@@ -880,6 +1027,13 @@ paths:
         - `user_left` - User left channel
         - `channel_created` - New channel created
         - `channel_updated` - Channel was updated
+        - `call_started` - Video call started
+        - `call_ended` - Video call ended
+        - `user_joined_call` - User joined video call
+        - `user_left_call` - User left video call
+        - `webrtc_offer` - WebRTC offer received
+        - `webrtc_answer` - WebRTC answer received
+        - `webrtc_ice_candidate` - ICE candidate received
       parameters:
         - name: token
           in: query
@@ -1369,6 +1523,165 @@ components:
           type: integer
           example: 25
 
+    # Video Calling Schemas
+    VideoCall:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        channelId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        hostId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        title:
+          type: string
+          example: "Team Meeting"
+        isActive:
+          type: boolean
+          example: true
+        maxParticipants:
+          type: integer
+          example: 10
+        currentParticipants:
+          type: integer
+          example: 3
+        startedAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+        endedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2023-01-01T01:00:00Z"
+
+    StartCallRequest:
+      type: object
+      required:
+        - channelId
+        - title
+      properties:
+        channelId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        title:
+          type: string
+          maxLength: 100
+          example: "Team Meeting"
+        maxParticipants:
+          type: integer
+          minimum: 2
+          maximum: 50
+          default: 10
+          example: 10
+        isPrivate:
+          type: boolean
+          default: false
+          example: false
+
+    JoinCallRequest:
+      type: object
+      properties:
+        participantName:
+          type: string
+          maxLength: 50
+          example: "John Doe"
+
+    CallParticipant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        userId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        user:
+          $ref: '#/components/schemas/User'
+        joinedAt:
+          type: string
+          format: date-time
+          example: "2023-01-01T00:00:00Z"
+        isHost:
+          type: boolean
+          example: false
+        isMuted:
+          type: boolean
+          example: false
+        isVideoEnabled:
+          type: boolean
+          example: true
+        connectionStatus:
+          type: string
+          enum: [connecting, connected, disconnected]
+          example: "connected"
+
+    WebRTCOffer:
+      type: object
+      properties:
+        callId:
+          type: string
+          format: uuid
+        fromUserId:
+          type: string
+          format: uuid
+        toUserId:
+          type: string
+          format: uuid
+        offer:
+          type: object
+          description: WebRTC offer object
+        timestamp:
+          type: string
+          format: date-time
+
+    WebRTCAnswer:
+      type: object
+      properties:
+        callId:
+          type: string
+          format: uuid
+        fromUserId:
+          type: string
+          format: uuid
+        toUserId:
+          type: string
+          format: uuid
+        answer:
+          type: object
+          description: WebRTC answer object
+        timestamp:
+          type: string
+          format: date-time
+
+    ICE candidate:
+      type: object
+      properties:
+        callId:
+          type: string
+          format: uuid
+        fromUserId:
+          type: string
+          format: uuid
+        toUserId:
+          type: string
+          format: uuid
+        candidate:
+          type: object
+          description: ICE candidate object
+        timestamp:
+          type: string
+          format: date-time
+
     # Common Schemas
     ErrorResponse:
       type: object
@@ -1408,5 +1721,7 @@ tags:
     description: File upload and management
   - name: Search
     description: Search functionality
+  - name: Video Calls
+    description: Video calling and WebRTC functionality
   - name: WebSocket
     description: Real-time communication

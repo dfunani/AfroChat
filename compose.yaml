@@ -1,0 +1,24 @@
+services:
+  # backend-server:
+  #   build:
+  #     context: .
+  #     target: final
+  #   ports:
+  #     - 8080:8080
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  database:
+    image: public.ecr.aws/docker/library/postgres:15.3
+    restart: always
+    environment:
+      POSTGRES_USER: afrochatuser
+      POSTGRES_PASSWORD: afrochatpassword
+      POSTGRES_DB: afrochat
+    ports:
+      - '5432:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+volumes:
+  db-data:
+

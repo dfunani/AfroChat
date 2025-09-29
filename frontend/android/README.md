@@ -79,6 +79,11 @@ android/
 │   │   │   │   │   ├── ChatScreen.kt
 │   │   │   │   │   ├── MessageListScreen.kt
 │   │   │   │   │   └── ThreadScreen.kt
+│   │   │   │   ├── video/
+│   │   │   │   │   ├── VideoCallScreen.kt
+│   │   │   │   │   ├── ParticipantGridScreen.kt
+│   │   │   │   │   ├── VideoCallControls.kt
+│   │   │   │   │   └── ScreenShareScreen.kt
 │   │   │   │   └── profile/
 │   │   │   │       ├── ProfileScreen.kt
 │   │   │   │       └── SettingsScreen.kt
@@ -258,6 +263,10 @@ dependencies {
     implementation platform('com.google.firebase:firebase-bom:32.7.0')
     implementation 'com.google.firebase:firebase-messaging-ktx'
     implementation 'com.google.firebase:firebase-analytics-ktx'
+    
+    // WebRTC
+    implementation 'org.webrtc:google-webrtc:1.0.32006'
+    implementation 'io.getstream:stream-webrtc-android:1.0.0'
     
     // Testing
     testImplementation 'junit:junit:4.13.2'
@@ -689,6 +698,368 @@ interface MessageDao {
 }
 ```
 
+## 📹 Video Calling Implementation
+
+### WebRTC Service
+```kotlin
+// services/WebRTCService.kt
+import org.webrtc.*
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Singleton
+class WebRTCService @Inject constructor() {
+    private var peerConnectionFactory: PeerConnectionFactory? = null
+    private val peerConnections = mutableMapOf<String, PeerConnection>()
+    private var localVideoSource: VideoSource? = null
+    private var localVideoTrack: VideoTrack? = null
+    private var localAudioTrack: AudioTrack? = null
+    
+    fun initialize() {
+        val initializationOptions = PeerConnectionFactory.InitializationOptions.builder()
+            .setEnableInternalTracer(true)
+            .setFieldTrials("")
+            .createInitializationOptions()
+        
+        PeerConnectionFactory.initialize(initializationOptions)
+        
+        val options = PeerConnectionFactory.Options()
+        peerConnectionFactory = PeerConnectionFactory.builder()
+            .setOptions(options)
+            .createPeerConnectionFactory()
+    }
+    
+    fun createLocalVideoTrack(): VideoTrack? {
+        val videoCapturer = createCameraCapturer()
+        localVideoSource = peerConnectionFactory?.createVideoSource(false)
+        localVideoTrack = peerConnectionFactory?.createVideoTrack("video_track", localVideoSource)
+        
+        videoCapturer?.initialize(
+            SurfaceTextureHelper.create("CaptureThread", null),
+            localVideoSource?.capturerObserver
+        )
+        videoCapturer?.startCapture(1280, 720, 30)
+        
+        return localVideoTrack
+    }
+    
+    fun createLocalAudioTrack(): AudioTrack? {
+        val audioSource = peerConnectionFactory?.createAudioSource(MediaConstraints())
+        localAudioTrack = peerConnectionFactory?.createAudioTrack("audio_track", audioSource)
+        return localAudioTrack
+    }
+    
+    fun createPeerConnection(userId: String): PeerConnection? {
+        val rtcConfig = PeerConnection.RTCConfiguration(
+            listOf(
+                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
+            )
+        )
+        
+        val peerConnection = peerConnectionFactory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
+            override fun onSignalingChange(signalingState: PeerConnection.SignalingState?) {}
+            override fun onIceConnectionChange(iceConnectionState: PeerConnection.IceConnectionState?) {}
+            override fun onIceConnectionReceivingChange(receiving: Boolean) {}
+            override fun onIceGatheringChange(iceGatheringState: PeerConnection.IceGatheringState?) {}
+            override fun onIceCandidate(iceCandidate: IceCandidate?) {
+                // Send ICE candidate via WebSocket
+                sendICECandidate(userId, iceCandidate)
+            }
+            override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {}
+            override fun onAddStream(mediaStream: MediaStream?) {
+                // Handle remote stream
+                handleRemoteStream(userId, mediaStream)
+            }
+            override fun onRemoveStream(mediaStream: MediaStream?) {}
+            override fun onDataChannel(dataChannel: DataChannel?) {}
+            override fun onRenegotiationNeeded() {}
+            override fun onAddTrack(rtpReceiver: RtpReceiver?, streams: Array<out MediaStream>?) {}
+        })
+        
+        peerConnections[userId] = peerConnection
+        return peerConnection
+    }
+    
+    fun createOffer(userId: String, callback: (SessionDescription?) -> Unit) {
+        val peerConnection = createPeerConnection(userId)
+        val mediaConstraints = MediaConstraints()
+        
+        peerConnection?.createOffer(object : SdpObserver {
+            override fun onCreateSuccess(sessionDescription: SessionDescription?) {
+                peerConnection.setLocalDescription(object : SdpObserver {
+                    override fun onCreateSuccess(p0: SessionDescription?) {}
+                    override fun onSetSuccess() {
+                        callback(sessionDescription)
+                    }
+                    override fun onCreateFailure(p0: String?) {}
+                    override fun onSetFailure(p0: String?) {}
+                }, sessionDescription)
+            }
+            override fun onSetSuccess() {}
+            override fun onCreateFailure(p0: String?) {}
+            override fun onSetFailure(p0: String?) {}
+        }, mediaConstraints)
+    }
+    
+    fun handleOffer(userId: String, offer: SessionDescription) {
+        val peerConnection = createPeerConnection(userId)
+        peerConnection?.setRemoteDescription(object : SdpObserver {
+            override fun onCreateSuccess(p0: SessionDescription?) {}
+            override fun onSetSuccess() {
+                createAnswer(userId, peerConnection)
+            }
+            override fun onCreateFailure(p0: String?) {}
+            override fun onSetFailure(p0: String?) {}
+        }, offer)
+    }
+    
+    private fun createAnswer(userId: String, peerConnection: PeerConnection) {
+        val mediaConstraints = MediaConstraints()
+        peerConnection.createAnswer(object : SdpObserver {
+            override fun onCreateSuccess(sessionDescription: SessionDescription?) {
+                peerConnection.setLocalDescription(object : SdpObserver {
+                    override fun onCreateSuccess(p0: SessionDescription?) {}
+                    override fun onSetSuccess() {
+                        // Send answer via WebSocket
+                        sendAnswer(userId, sessionDescription)
+                    }
+                    override fun onCreateFailure(p0: String?) {}
+                    override fun onSetFailure(p0: String?) {}
+                }, sessionDescription)
+            }
+            override fun onSetSuccess() {}
+            override fun onCreateFailure(p0: String?) {}
+            override fun onSetFailure(p0: String?) {}
+        }, mediaConstraints)
+    }
+    
+    private fun createCameraCapturer(): CameraVideoCapturer? {
+        val cameraEnumerator = Camera2Enumerator()
+        val deviceNames = cameraEnumerator.deviceNames
+        
+        for (deviceName in deviceNames) {
+            if (cameraEnumerator.isFrontFacing(deviceName)) {
+                return cameraEnumerator.createCapturer(deviceName, null)
+            }
+        }
+        
+        return null
+    }
+    
+    private fun sendICECandidate(userId: String, candidate: IceCandidate?) {
+        // Send via WebSocket
+    }
+    
+    private fun sendAnswer(userId: String, answer: SessionDescription?) {
+        // Send via WebSocket
+    }
+    
+    private fun handleRemoteStream(userId: String, stream: MediaStream?) {
+        // Handle remote video stream
+    }
+}
+```
+
+### Video Call ViewModel
+```kotlin
+// presentation/viewmodels/VideoCallViewModel.kt
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+@HiltViewModel
+class VideoCallViewModel @Inject constructor(
+    private val videoCallRepository: VideoCallRepository,
+    private val webrtcService: WebRTCService
+) : ViewModel() {
+    
+    private val _uiState = MutableStateFlow(VideoCallUiState())
+    val uiState: StateFlow<VideoCallUiState> = _uiState.asStateFlow()
+    
+    private val _participants = MutableStateFlow<List<CallParticipant>>(emptyList())
+    val participants: StateFlow<List<CallParticipant>> = _participants.asStateFlow()
+    
+    fun startCall(channelId: String, title: String) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            
+            try {
+                val call = videoCallRepository.startCall(StartCallRequest(channelId, title))
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    isInCall = true,
+                    currentCall = call
+                )
+                
+                // Initialize WebRTC
+                webrtcService.initialize()
+                webrtcService.createLocalVideoTrack()
+                webrtcService.createLocalAudioTrack()
+                
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    error = e.message
+                )
+            }
+        }
+    }
+    
+    fun joinCall(callId: String) {
+        viewModelScope.launch {
+            try {
+                val call = videoCallRepository.joinCall(callId)
+                _uiState.value = _uiState.value.copy(
+                    isInCall = true,
+                    currentCall = call
+                )
+                
+                // Initialize WebRTC
+                webrtcService.initialize()
+                webrtcService.createLocalVideoTrack()
+                webrtcService.createLocalAudioTrack()
+                
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+    
+    fun leaveCall() {
+        viewModelScope.launch {
+            try {
+                videoCallRepository.leaveCall()
+                _uiState.value = _uiState.value.copy(
+                    isInCall = false,
+                    currentCall = null
+                )
+                _participants.value = emptyList()
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+    
+    fun toggleMute() {
+        webrtcService.toggleMute()
+        _uiState.value = _uiState.value.copy(isMuted = !_uiState.value.isMuted)
+    }
+    
+    fun toggleVideo() {
+        webrtcService.toggleVideo()
+        _uiState.value = _uiState.value.copy(isVideoEnabled = !_uiState.value.isVideoEnabled)
+    }
+    
+    fun toggleScreenShare() {
+        viewModelScope.launch {
+            try {
+                if (_uiState.value.isScreenSharing) {
+                    webrtcService.stopScreenShare()
+                } else {
+                    webrtcService.startScreenShare()
+                }
+                _uiState.value = _uiState.value.copy(
+                    isScreenSharing = !_uiState.value.isScreenSharing
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+}
+
+data class VideoCallUiState(
+    val isLoading: Boolean = false,
+    val isInCall: Boolean = false,
+    val isMuted: Boolean = false,
+    val isVideoEnabled: Boolean = true,
+    val isScreenSharing: Boolean = false,
+    val currentCall: VideoCall? = null,
+    val error: String? = null
+)
+```
+
+### Video Call Screen
+```kotlin
+// presentation/screens/video/VideoCallScreen.kt
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VideoCallScreen(
+    callId: String?,
+    channelId: String,
+    viewModel: VideoCallViewModel = hiltViewModel()
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val participants by viewModel.participants.collectAsStateWithLifecycle()
+    
+    LaunchedEffect(callId) {
+        if (callId != null) {
+            viewModel.joinCall(callId)
+        }
+    }
+    
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Participant grid
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(participants) { participant ->
+                ParticipantVideoItem(
+                    participant = participant,
+                    modifier = Modifier.aspectRatio(16f / 9f)
+                )
+            }
+        }
+        
+        // Call controls
+        VideoCallControls(
+            isMuted = uiState.isMuted,
+            isVideoEnabled = uiState.isVideoEnabled,
+            isScreenSharing = uiState.isScreenSharing,
+            onToggleMute = { viewModel.toggleMute() },
+            onToggleVideo = { viewModel.toggleVideo() },
+            onToggleScreenShare = { viewModel.toggleScreenShare() },
+            onLeaveCall = { viewModel.leaveCall() },
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+    }
+    
+    if (uiState.isLoading) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator()
+        }
+    }
+    
+    uiState.error?.let { error ->
+        LaunchedEffect(error) {
+            // Show error snackbar
+        }
+    }
+}
+```
+
 ## 🔔 Push Notifications
 
 ### Firebase Messaging
@@ -715,13 +1086,24 @@ class AfroChatMessagingService : FirebaseMessagingService() {
             val title = data["title"] ?: "New Message"
             val body = data["body"] ?: "You have a new message"
             val channelId = data["channel_id"]
+            val callId = data["call_id"]
             
             CoroutineScope(Dispatchers.Main).launch {
-                notificationManager.showNotification(
-                    title = title,
-                    body = body,
-                    channelId = channelId
-                )
+                if (callId != null) {
+                    // Video call notification
+                    notificationManager.showCallNotification(
+                        title = title,
+                        body = body,
+                        callId = callId
+                    )
+                } else {
+                    // Regular message notification
+                    notificationManager.showNotification(
+                        title = title,
+                        body = body,
+                        channelId = channelId
+                    )
+                }
             }
         }
     }

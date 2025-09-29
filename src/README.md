@@ -25,7 +25,8 @@ backend/
 │   ├── workspace/         # Workspace service
 │   ├── notification/      # Notification service
 │   ├── file/              # File service
-│   └── search/            # Search service
+│   ├── search/            # Search service
+│   └── video/              # Video calling service
 ├── pkg/                   # Public library code
 │   ├── database/          # Database connections
 │   ├── redis/             # Redis client
@@ -540,6 +541,148 @@ func (h *Hub) HandleTyping(client *Client, channelID uuid.UUID) {
     }
     
     h.broadcastToChannel(channelID, typingMessage)
+}
+```
+
+## 📹 Video Calling Implementation
+
+### Video Call Service
+```go
+// internal/video/service.go
+type VideoCallService struct {
+    db      *sql.DB
+    redis   *redis.Client
+    hub     *websocket.Hub
+}
+
+type VideoCall struct {
+    ID                uuid.UUID `json:"id" db:"id"`
+    ChannelID         uuid.UUID `json:"channel_id" db:"channel_id"`
+    HostID            uuid.UUID `json:"host_id" db:"host_id"`
+    Title             string    `json:"title" db:"title"`
+    IsActive          bool      `json:"is_active" db:"is_active"`
+    MaxParticipants   int       `json:"max_participants" db:"max_participants"`
+    CurrentParticipants int     `json:"current_participants" db:"current_participants"`
+    StartedAt         time.Time `json:"started_at" db:"started_at"`
+    EndedAt           *time.Time `json:"ended_at" db:"ended_at"`
+}
+
+func (v *VideoCallService) StartCall(request *StartCallRequest) (*VideoCall, error) {
+    call := &VideoCall{
+        ID:              uuid.New(),
+        ChannelID:       request.ChannelID,
+        HostID:          request.HostID,
+        Title:           request.Title,
+        IsActive:        true,
+        MaxParticipants: request.MaxParticipants,
+        StartedAt:       time.Now(),
+    }
+    
+    // Save to database
+    err := v.saveCall(call)
+    if err != nil {
+        return nil, err
+    }
+    
+    // Broadcast call started event
+    v.hub.BroadcastToChannel(call.ChannelID, WebSocketMessage{
+        Type: "call_started",
+        Data: call,
+    })
+    
+    return call, nil
+}
+
+func (v *VideoCallService) JoinCall(callID uuid.UUID, userID uuid.UUID) error {
+    // Add participant to call
+    participant := &CallParticipant{
+        ID:       uuid.New(),
+        CallID:   callID,
+        UserID:   userID,
+        JoinedAt: time.Now(),
+        IsHost:   false,
+    }
+    
+    err := v.addParticipant(participant)
+    if err != nil {
+        return err
+    }
+    
+    // Broadcast user joined call
+    v.hub.BroadcastToCall(callID, WebSocketMessage{
+        Type: "user_joined_call",
+        Data: participant,
+    })
+    
+    return nil
+}
+
+func (v *VideoCallService) HandleWebRTCOffer(offer *WebRTCOffer) error {
+    // Forward WebRTC offer to target user
+    v.hub.SendToUser(offer.ToUserID, WebSocketMessage{
+        Type: "webrtc_offer",
+        Data: offer,
+    })
+    
+    return nil
+}
+
+func (v *VideoCallService) HandleWebRTCAnswer(answer *WebRTCAnswer) error {
+    // Forward WebRTC answer to target user
+    v.hub.SendToUser(answer.ToUserID, WebSocketMessage{
+        Type: "webrtc_answer",
+        Data: answer,
+    })
+    
+    return nil
+}
+
+func (v *VideoCallService) HandleICECandidate(candidate *ICECandidate) error {
+    // Forward ICE candidate to target user
+    v.hub.SendToUser(candidate.ToUserID, WebSocketMessage{
+        Type: "webrtc_ice_candidate",
+        Data: candidate,
+    })
+    
+    return nil
+}
+```
+
+### WebRTC Signaling
+```go
+// pkg/webrtc/signaling.go
+type SignalingServer struct {
+    hub *websocket.Hub
+}
+
+func (s *SignalingServer) HandleWebRTCMessage(client *websocket.Client, message *WebSocketMessage) {
+    switch message.Type {
+    case "webrtc_offer":
+        var offer WebRTCOffer
+        json.Unmarshal(message.Data, &offer)
+        s.handleOffer(client, &offer)
+        
+    case "webrtc_answer":
+        var answer WebRTCAnswer
+        json.Unmarshal(message.Data, &answer)
+        s.handleAnswer(client, &answer)
+        
+    case "webrtc_ice_candidate":
+        var candidate ICECandidate
+        json.Unmarshal(message.Data, &candidate)
+        s.handleICECandidate(client, &candidate)
+    }
+}
+
+func (s *SignalingServer) handleOffer(client *websocket.Client, offer *WebRTCOffer) {
+    // Forward offer to target user
+    targetClient := s.hub.GetClientByUserID(offer.ToUserID)
+    if targetClient != nil {
+        targetClient.Send(WebSocketMessage{
+            Type: "webrtc_offer",
+            Data: offer,
+        })
+    }
 }
 ```
 

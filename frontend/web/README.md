@@ -39,6 +39,13 @@ web/
 │   │   │   ├── TypingIndicator.tsx
 │   │   │   ├── MessageReactions.tsx
 │   │   │   └── ThreadView.tsx
+│   │   ├── video/               # Video calling components
+│   │   │   ├── VideoCallModal.tsx
+│   │   │   ├── VideoCallControls.tsx
+│   │   │   ├── ParticipantGrid.tsx
+│   │   │   ├── ParticipantVideo.tsx
+│   │   │   ├── ScreenShare.tsx
+│   │   │   └── CallSettings.tsx
 │   │   ├── workspace/           # Workspace components
 │   │   │   ├── WorkspaceSidebar.tsx
 │   │   │   ├── ChannelList.tsx
@@ -82,7 +89,10 @@ web/
 │   │   ├── useFileUpload.ts
 │   │   ├── useNotifications.ts
 │   │   ├── useLocalStorage.ts
-│   │   └── useDebounce.ts
+│   │   ├── useDebounce.ts
+│   │   ├── useVideoCall.ts
+│   │   ├── useWebRTC.ts
+│   │   └── useScreenShare.ts
 │   ├── services/
 │   │   ├── api.ts
 │   │   ├── websocket.ts
@@ -90,7 +100,9 @@ web/
 │   │   ├── chat.ts
 │   │   ├── workspace.ts
 │   │   ├── file.ts
-│   │   └── notification.ts
+│   │   ├── notification.ts
+│   │   ├── videoCall.ts
+│   │   └── webrtc.ts
 │   ├── store/
 │   │   ├── authStore.ts
 │   │   ├── chatStore.ts
@@ -595,6 +607,378 @@ self.addEventListener('fetch', (event) => {
 }
 ```
 
+## 📹 Video Calling Implementation
+
+### Video Call Hook
+```typescript
+// hooks/useVideoCall.ts
+import { useState, useEffect, useCallback } from 'react'
+import { videoCallService } from '@/services/videoCall'
+import { webrtcService } from '@/services/webrtc'
+
+export const useVideoCall = (channelId: string) => {
+  const [isInCall, setIsInCall] = useState(false)
+  const [participants, setParticipants] = useState<Participant[]>([])
+  const [isMuted, setIsMuted] = useState(false)
+  const [isVideoEnabled, setIsVideoEnabled] = useState(true)
+  const [isScreenSharing, setIsScreenSharing] = useState(false)
+
+  const startCall = useCallback(async (title: string) => {
+    try {
+      const call = await videoCallService.startCall({
+        channelId,
+        title,
+        maxParticipants: 10,
+        isPrivate: false
+      })
+      
+      setIsInCall(true)
+      await webrtcService.initializeCall(call.id)
+      
+      return call
+    } catch (error) {
+      console.error('Failed to start call:', error)
+      throw error
+    }
+  }, [channelId])
+
+  const joinCall = useCallback(async (callId: string) => {
+    try {
+      await videoCallService.joinCall(callId)
+      setIsInCall(true)
+      await webrtcService.joinCall(callId)
+    } catch (error) {
+      console.error('Failed to join call:', error)
+      throw error
+    }
+  }, [])
+
+  const leaveCall = useCallback(async () => {
+    try {
+      await webrtcService.leaveCall()
+      await videoCallService.leaveCall()
+      setIsInCall(false)
+      setParticipants([])
+    } catch (error) {
+      console.error('Failed to leave call:', error)
+    }
+  }, [])
+
+  const toggleMute = useCallback(() => {
+    webrtcService.toggleMute()
+    setIsMuted(!isMuted)
+  }, [isMuted])
+
+  const toggleVideo = useCallback(() => {
+    webrtcService.toggleVideo()
+    setIsVideoEnabled(!isVideoEnabled)
+  }, [isVideoEnabled])
+
+  const toggleScreenShare = useCallback(async () => {
+    if (isScreenSharing) {
+      await webrtcService.stopScreenShare()
+    } else {
+      await webrtcService.startScreenShare()
+    }
+    setIsScreenSharing(!isScreenSharing)
+  }, [isScreenSharing])
+
+  return {
+    isInCall,
+    participants,
+    isMuted,
+    isVideoEnabled,
+    isScreenSharing,
+    startCall,
+    joinCall,
+    leaveCall,
+    toggleMute,
+    toggleVideo,
+    toggleScreenShare
+  }
+}
+```
+
+### WebRTC Service
+```typescript
+// services/webrtc.ts
+class WebRTCService {
+  private peerConnections: Map<string, RTCPeerConnection> = new Map()
+  private localStream: MediaStream | null = null
+  private screenStream: MediaStream | null = null
+
+  async initializeCall(callId: string) {
+    // Get user media
+    this.localStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    })
+
+    // Setup WebSocket listeners for WebRTC signaling
+    websocketService.on('webrtc_offer', this.handleOffer.bind(this))
+    websocketService.on('webrtc_answer', this.handleAnswer.bind(this))
+    websocketService.on('webrtc_ice_candidate', this.handleICECandidate.bind(this))
+  }
+
+  async createPeerConnection(userId: string): Promise<RTCPeerConnection> {
+    const configuration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    }
+
+    const peerConnection = new RTCPeerConnection(configuration)
+    
+    // Add local stream
+    if (this.localStream) {
+      this.localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, this.localStream!)
+      })
+    }
+
+    // Handle ICE candidates
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        this.sendICECandidate(userId, event.candidate)
+      }
+    }
+
+    // Handle remote stream
+    peerConnection.ontrack = (event) => {
+      this.handleRemoteStream(userId, event.streams[0])
+    }
+
+    this.peerConnections.set(userId, peerConnection)
+    return peerConnection
+  }
+
+  async createOffer(userId: string): Promise<RTCSessionDescriptionInit> {
+    const peerConnection = await this.createPeerConnection(userId)
+    const offer = await peerConnection.createOffer()
+    await peerConnection.setLocalDescription(offer)
+    
+    this.sendOffer(userId, offer)
+    return offer
+  }
+
+  async handleOffer(offer: WebRTCOffer) {
+    const peerConnection = await this.createPeerConnection(offer.fromUserId)
+    await peerConnection.setRemoteDescription(offer.offer)
+    
+    const answer = await peerConnection.createAnswer()
+    await peerConnection.setLocalDescription(answer)
+    
+    this.sendAnswer(offer.fromUserId, answer)
+  }
+
+  async handleAnswer(answer: WebRTCAnswer) {
+    const peerConnection = this.peerConnections.get(answer.fromUserId)
+    if (peerConnection) {
+      await peerConnection.setRemoteDescription(answer.answer)
+    }
+  }
+
+  async handleICECandidate(candidate: ICECandidate) {
+    const peerConnection = this.peerConnections.get(candidate.fromUserId)
+    if (peerConnection) {
+      await peerConnection.addIceCandidate(candidate.candidate)
+    }
+  }
+
+  async startScreenShare() {
+    try {
+      this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true
+      })
+
+      // Replace video track in all peer connections
+      this.peerConnections.forEach(peerConnection => {
+        const videoTrack = this.screenStream!.getVideoTracks()[0]
+        const sender = peerConnection.getSenders().find(s => 
+          s.track && s.track.kind === 'video'
+        )
+        if (sender) {
+          sender.replaceTrack(videoTrack)
+        }
+      })
+
+      return this.screenStream
+    } catch (error) {
+      console.error('Failed to start screen share:', error)
+      throw error
+    }
+  }
+
+  async stopScreenShare() {
+    if (this.screenStream) {
+      this.screenStream.getTracks().forEach(track => track.stop())
+      this.screenStream = null
+    }
+  }
+
+  toggleMute() {
+    if (this.localStream) {
+      const audioTrack = this.localStream.getAudioTracks()[0]
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled
+      }
+    }
+  }
+
+  toggleVideo() {
+    if (this.localStream) {
+      const videoTrack = this.localStream.getVideoTracks()[0]
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled
+      }
+    }
+  }
+
+  private sendOffer(userId: string, offer: RTCSessionDescriptionInit) {
+    websocketService.send('webrtc_offer', {
+      toUserId: userId,
+      offer,
+      timestamp: new Date().toISOString()
+    })
+  }
+
+  private sendAnswer(userId: string, answer: RTCSessionDescriptionInit) {
+    websocketService.send('webrtc_answer', {
+      toUserId: userId,
+      answer,
+      timestamp: new Date().toISOString()
+    })
+  }
+
+  private sendICECandidate(userId: string, candidate: RTCIceCandidate) {
+    websocketService.send('webrtc_ice_candidate', {
+      toUserId: userId,
+      candidate,
+      timestamp: new Date().toISOString()
+    })
+  }
+
+  private handleRemoteStream(userId: string, stream: MediaStream) {
+    // Emit event for UI to handle remote stream
+    window.dispatchEvent(new CustomEvent('remoteStream', {
+      detail: { userId, stream }
+    }))
+  }
+}
+
+export const webrtcService = new WebRTCService()
+```
+
+### Video Call Component
+```typescript
+// components/video/VideoCallModal.tsx
+import { useState, useEffect, useRef } from 'react'
+import { useVideoCall } from '@/hooks/useVideoCall'
+import { ParticipantGrid } from './ParticipantGrid'
+import { VideoCallControls } from './VideoCallControls'
+
+interface VideoCallModalProps {
+  channelId: string
+  callId?: string
+  onClose: () => void
+}
+
+export const VideoCallModal = ({ channelId, callId, onClose }: VideoCallModalProps) => {
+  const {
+    isInCall,
+    participants,
+    isMuted,
+    isVideoEnabled,
+    isScreenSharing,
+    startCall,
+    joinCall,
+    leaveCall,
+    toggleMute,
+    toggleVideo,
+    toggleScreenShare
+  } = useVideoCall(channelId)
+
+  const [callTitle, setCallTitle] = useState('')
+  const [isStarting, setIsStarting] = useState(false)
+
+  useEffect(() => {
+    if (callId) {
+      joinCall(callId)
+    }
+  }, [callId, joinCall])
+
+  const handleStartCall = async () => {
+    if (!callTitle.trim()) return
+    
+    setIsStarting(true)
+    try {
+      await startCall(callTitle)
+    } catch (error) {
+      console.error('Failed to start call:', error)
+    } finally {
+      setIsStarting(false)
+    }
+  }
+
+  const handleLeaveCall = () => {
+    leaveCall()
+    onClose()
+  }
+
+  if (!isInCall && !callId) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 w-96">
+          <h2 className="text-xl font-bold mb-4">Start Video Call</h2>
+          <input
+            type="text"
+            placeholder="Call title"
+            value={callTitle}
+            onChange={(e) => setCallTitle(e.target.value)}
+            className="w-full p-2 border rounded mb-4"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={handleStartCall}
+              disabled={isStarting || !callTitle.trim()}
+              className="flex-1 bg-blue-500 text-white py-2 px-4 rounded disabled:opacity-50"
+            >
+              {isStarting ? 'Starting...' : 'Start Call'}
+            </button>
+            <button
+              onClick={onClose}
+              className="flex-1 bg-gray-500 text-white py-2 px-4 rounded"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black flex flex-col z-50">
+      <div className="flex-1 relative">
+        <ParticipantGrid participants={participants} />
+      </div>
+      
+      <VideoCallControls
+        isMuted={isMuted}
+        isVideoEnabled={isVideoEnabled}
+        isScreenSharing={isScreenSharing}
+        onToggleMute={toggleMute}
+        onToggleVideo={toggleVideo}
+        onToggleScreenShare={toggleScreenShare}
+        onLeaveCall={handleLeaveCall}
+      />
+    </div>
+  )
+}
+```
+
 ## 🔔 Notifications
 
 ### Notification Service
@@ -643,6 +1027,21 @@ class NotificationService {
         body: message.content,
         tag: 'message',
         requireInteraction: false,
+      }
+    )
+  }
+
+  showCallNotification(call: { title: string; host: { displayName: string } }) {
+    this.showNotification(
+      `Video call: ${call.title}`,
+      {
+        body: `Started by ${call.host.displayName}`,
+        tag: 'video_call',
+        requireInteraction: true,
+        actions: [
+          { action: 'join', title: 'Join Call' },
+          { action: 'decline', title: 'Decline' }
+        ]
       }
     )
   }
